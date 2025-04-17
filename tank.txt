@@ -1,0 +1,191 @@
+import plotly.graph_objects as go
+import numpy as np # numpyは必須ではないが、計算に便利
+
+# --- パラメータ設定 ---
+num_tanks = 3  # <--- ここで洗浄槽の数を変更 (2, 3, or 4)
+
+initial_fiber_mass = 95.0  # kg (繊維本体)
+initial_contaminant_mass = 5.0 # kg (初期の汚染物質量)
+total_water_input = 1000.0 # kg (総投入水量)
+removal_rate_per_tank = 0.6 # 各槽での汚染除去率 (0.0 ~ 1.0)
+water_carry_over = 10.0    # 槽間で繊維と共に移動する水量 (kg)
+
+# --- 事前計算 ---
+# 各槽への投入水量 (並流洗浄)
+water_per_tank = total_water_input / num_tanks
+if water_per_tank <= water_carry_over and num_tanks > 1:
+    print("警告: 各槽への投入水量が槽間持ち越し水量以下です。計算が現実的でない可能性があります。")
+
+# --- ノードリストの生成 ---
+nodes = ["汚れた繊維 (入力)", "洗浄水 (入力)"]
+for i in range(num_tanks):
+    nodes.append(f"第{i+1}洗浄槽")
+nodes.extend(["洗浄済み繊維 (出力)", "総排水 (出力)"])
+
+# ノード名とインデックスの対応辞書 (コードを読みやすくするため)
+node_indices = {name: i for i, name in enumerate(nodes)}
+
+# --- リンクと流量の計算 ---
+sources = [] # リンクの始点ノードリスト
+targets = [] # リンクの終点ノードリスト
+values = []  # リンクの流量リスト
+link_labels = [] # 各リンクのホバーテキスト用リスト
+node_hover_texts = [""] * len(nodes) # 各ノードのホバーテキスト用リスト
+
+# 初期状態の物質量
+current_fiber_mass = initial_fiber_mass
+current_contaminant_mass = initial_contaminant_mass
+total_fiber_input_mass = current_fiber_mass + current_contaminant_mass
+total_drain_mass = 0.0 # 総排水量を積算
+
+# 入力ノードのホバーテキスト設定
+node_hover_texts[node_indices["汚れた繊維 (入力)"]] = f"投入量: {total_fiber_input_mass:.2f} kg\n(繊維: {initial_fiber_mass:.2f} kg, 汚染: {initial_contaminant_mass:.2f} kg)"
+node_hover_texts[node_indices["洗浄水 (入力)"]] = f"総投入量: {total_water_input:.2f} kg\n(各槽へ {water_per_tank:.2f} kg)"
+# 出力ノードのホバーテキストは後で更新
+
+# 1. 入力 -> 第1洗浄槽 への流れ
+# 汚れた繊維 -> 第1槽
+sources.append(node_indices["汚れた繊維 (入力)"])
+targets.append(node_indices["第1洗浄槽"])
+values.append(total_fiber_input_mass)
+link_labels.append(f"汚れた繊維: {total_fiber_input_mass:.2f} kg")
+
+# 洗浄水 -> 第1槽
+sources.append(node_indices["洗浄水 (入力)"])
+targets.append(node_indices["第1洗浄槽"])
+values.append(water_per_tank)
+link_labels.append(f"第1槽への洗浄水: {water_per_tank:.2f} kg")
+
+# 2. 各洗浄槽間の処理 (ループ処理)
+carried_water_from_previous = 0.0 # 前の槽から持ち越された水量 (第1槽に入る時点では0)
+
+for i in range(num_tanks):
+    current_tank_name = f"第{i+1}洗浄槽"
+    current_tank_index = node_indices[current_tank_name]
+
+    # --- 現在の槽での計算 ---
+    # 槽に入る合計水量
+    water_in_tank = water_per_tank + carried_water_from_previous
+
+    # 汚染物質の除去
+    removed_contaminant = current_contaminant_mass * removal_rate_per_tank
+    current_contaminant_mass -= removed_contaminant # 槽を出る時点での汚染物質量
+
+    # 排水量の計算
+    # この槽からの排水量 = (投入された新しい水 + 前槽からの持越水) - 次槽への持越水 + 除去された汚染物質
+    # ただし、最終槽では次槽への持ち越しはないが、製品への残留水がある
+    water_to_next_or_product = water_carry_over
+    drain_from_this_tank = water_in_tank - water_to_next_or_product + removed_contaminant
+    total_drain_mass += drain_from_this_tank
+
+    # 現在の槽のホバーテキスト
+    node_hover_texts[current_tank_index] = f"{current_tank_name}\n投入物質量(繊維+汚染): {(current_fiber_mass + current_contaminant_mass + removed_contaminant):.2f} kg\n投入水量(新規+持越): {water_in_tank:.2f} kg\n除去汚染: {removed_contaminant:.2f} kg\n排出排水量: {drain_from_this_tank:.2f} kg"
+
+    # --- 流れの定義 ---
+    # a) この槽からの排水 -> 総排水ノードへ
+    sources.append(current_tank_index)
+    targets.append(node_indices["総排水 (出力)"])
+    values.append(drain_from_this_tank)
+    link_labels.append(f"{current_tank_name}からの排水: {drain_from_this_tank:.2f} kg (除去汚染 {removed_contaminant:.2f} kg 含む)")
+
+    # b) 繊維と持ち越し水の移動 (次の槽 or 最終製品へ)
+    mass_to_next_or_product = current_fiber_mass + current_contaminant_mass + water_to_next_or_product
+
+    if i < num_tanks - 1:
+        # 次の槽がある場合
+        next_tank_name = f"第{i+2}洗浄槽"
+        next_tank_index = node_indices[next_tank_name]
+
+        # 繊維移動: 現槽 -> 次槽
+        sources.append(current_tank_index)
+        targets.append(next_tank_index)
+        values.append(mass_to_next_or_product)
+        link_labels.append(f"{current_tank_name} -> {next_tank_name}: {mass_to_next_or_product:.2f} kg (繊維+汚染+持越水{water_to_next_or_product:.1f}kg)")
+
+        # 新しい洗浄水の投入: 洗浄水入力 -> 次槽
+        sources.append(node_indices["洗浄水 (入力)"])
+        targets.append(next_tank_index)
+        values.append(water_per_tank)
+        link_labels.append(f"{next_tank_name}への洗浄水: {water_per_tank:.2f} kg")
+
+        # 次のループのために持ち越し水量を更新
+        carried_water_from_previous = water_to_next_or_product
+    else:
+        # 最後の槽の場合: 現槽 -> 洗浄済み繊維
+        sources.append(current_tank_index)
+        targets.append(node_indices["洗浄済み繊維 (出力)"])
+        values.append(mass_to_next_or_product)
+        link_labels.append(f"最終製品へ: {mass_to_next_or_product:.2f} kg")
+
+        # 出力ノードのホバーテキストを更新
+        node_hover_texts[node_indices["洗浄済み繊維 (出力)"]] = f"排出量: {mass_to_next_or_product:.2f} kg\n(繊維: {current_fiber_mass:.2f} kg, 残留汚染: {current_contaminant_mass:.2f} kg, 残留水: {water_to_next_or_product:.1f} kg)"
+        node_hover_texts[node_indices["総排水 (出力)"]] = f"総排出排水量: {total_drain_mass:.2f} kg"
+
+# --- 色の定義 (ノード数に応じて動的に) ---
+# 基本となる色のリスト
+node_color_palette = [
+    'rgba(160, 160, 160, 0.8)',  # 汚れた繊維 (入力)
+    'rgba(51, 153, 255, 0.8)',  # 洗浄水 (入力)
+    'rgba(255, 165, 0, 0.7)',  # 洗浄槽 1
+    'rgba(255, 185, 50, 0.7)',  # 洗浄槽 2
+    'rgba(255, 205, 100, 0.7)', # 洗浄槽 3
+    'rgba(255, 225, 150, 0.7)', # 洗浄槽 4 (必要に応じて追加)
+    'rgba(220, 220, 220, 0.8)', # 洗浄済み繊維 (出力)
+    'rgba(100, 149, 237, 0.8)'  # 総排水 (出力)
+]
+link_color_palette = [
+    'rgba(160, 160, 160, 0.4)',  # from 汚れた繊維
+    'rgba(51, 153, 255, 0.4)',  # from 洗浄水
+    'rgba(255, 165, 0, 0.3)',  # from 洗浄槽 1
+    'rgba(255, 185, 50, 0.3)',  # from 洗浄槽 2
+    'rgba(255, 205, 100, 0.3)', # from 洗浄槽 3
+    'rgba(255, 225, 150, 0.3)', # from 洗浄槽 4
+    'rgba(220, 220, 220, 0.4)', # to 洗浄済み繊維 (未使用だが配置)
+    'rgba(100, 149, 237, 0.4)'  # to 総排水 (未使用だが配置)
+]
+
+# ノード数に合わせて色を割り当て
+node_colors = [node_color_palette[0], node_color_palette[1]] # 入力ノード
+for i in range(num_tanks):
+    # 槽の色が足りなければパレットの最初に戻るなど調整可能
+    node_colors.append(node_color_palette[min(2 + i, len(node_color_palette) - 3)])
+node_colors.extend([node_color_palette[-2], node_color_palette[-1]]) # 出力ノード
+
+# リンクの色を始点ノードに合わせて割り当て
+link_colors = [link_color_palette[min(s_idx, len(link_color_palette)-1)] for s_idx in sources]
+
+
+# --- サンキーダイアグラムの作成 ---
+fig = go.Figure(data=[go.Sankey(
+    # ノード設定
+    node = dict(
+      pad = 15,                  # ノード間の余白
+      thickness = 20,            # ノードの太さ
+      line = dict(color = "black", width = 0.5), # ノードの枠線
+      label = nodes,             # ノードラベル
+      color = node_colors,       # ノード色
+      hoverinfo = "text",        # ホバー時にテキストを表示
+      hovertext = node_hover_texts # 表示するテキスト
+    ),
+    # リンク設定
+    link = dict(
+      source = sources,          # 始点リスト
+      target = targets,          # 終点リスト
+      value = values,            # 流量リスト
+      label = link_labels,       # リンクのホバーテキスト
+      color = link_colors,       # リンク色
+      hoverinfo = "label+value"  # ホバー時にラベルと流量を表示
+  ))])
+
+# --- グラフのタイトルとレイアウト ---
+fig.update_layout(
+    title_text=f"繊維の水洗工程 ({num_tanks}槽 並流洗浄) における物質収支 (例) [kg]",
+    font=dict(size=12, color='black'),
+    paper_bgcolor='white'
+)
+
+# --- グラフ表示 ---
+fig.show()
+
+# --- HTMLファイルとして保存 (オプション) ---
+# fig.write_html(f"sankey_washing_{num_tanks}tanks.html")
