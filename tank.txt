@@ -1,124 +1,101 @@
-import streamlit as st
-import pandas as pd
+# --- パラメータ設定 ---
+# 物理パラメータ
+D <- 1.0e-10       # DMSOの繊維内拡散係数 (m^2/s) - 例: 典型的な液体中の低分子の値
+R <- 0.0005        # 繊維の半径 (m) - 例: 0.5 mm
+C_fiber_in <- 0.1  # 繊維の初期DMSO濃度 (kg/m^3 または mol/m^3 など単位を統一) - 例
+C_tank_in <- 0.01  # 槽への流入液のDMSO濃度 (C_fiber_in と同じ単位) - 例
 
-def calculate_mass_balance(dirty_fiber_flow, dirty_fiber_contaminant, washing_liquid_flow, washed_fiber_contaminant_target):
-    """繊維の水洗工程の物質収支を計算する関数"""
+# 操作パラメータ
+Q_in <- 1.0e-5     # 槽への流入流量 (m^3/s) - 例: 10 mL/s
+L <- 1.0           # 槽内の繊維経路長 (m) - 例
+v_fiber <- 0.01    # 繊維の移動速度 (m/s) - 例: 1 cm/s
 
-    # インプット
-    mass_in_dirty_fiber = dirty_fiber_flow
-    mass_contaminant_in_dirty_fiber = dirty_fiber_flow * dirty_fiber_contaminant / 100
-    mass_fiber_in_dirty_fiber = mass_in_dirty_fiber - mass_contaminant_in_dirty_fiber
-    mass_in_washing_liquid = washing_liquid_flow
-    mass_contaminant_in_washing_liquid = 0  # 通常はゼロと仮定
-    mass_water_in_washing_liquid = mass_in_washing_liquid
+# 計算パラメータ
+n_terms <- 50      # ベッセル級数の項数 (十分な精度を得るために調整)
 
-    # アウトプット (一部仮定)
-    # 洗浄後の繊維中の不純物目標値から、不純物の質量を計算
-    mass_contaminant_in_washed_fiber = mass_fiber_in_dirty_fiber * washed_fiber_contaminant_target / 100
-    mass_out_washed_fiber = mass_fiber_in_dirty_fiber + mass_contaminant_in_washed_fiber
+# --- J0(x) = 0 の根 (lambda_n) の計算 ---
+# J0(x)=0 の根を数値的に求める関数 (uniroot を使用)
+find_J0_roots <- function(n_roots) {
+  roots <- numeric(n_roots)
+  # 根のおおよその位置 (n - 1/4) * pi を目安に探索区間を設定
+  for (i in 1:n_roots) {
+    # 探索区間: 前の根より大きく、おおよその位置の周辺
+    lower_bound <- if (i == 1) 0 else roots[i-1] + 1e-6 # Avoid starting exactly at previous root or 0
+    # upper_bound <- (i + 1) * pi # Ensure the root is within the interval
+    approx_root = (i - 0.25) * pi
+    interval = c(max(lower_bound, approx_root - pi), approx_root + pi) # Search around approx location
 
-    # 排水中の不純物の質量 (物質収支より)
-    mass_contaminant_in_wastewater = mass_contaminant_in_dirty_fiber + mass_contaminant_in_washing_liquid - mass_contaminant_in_washed_fiber
+    # unirootで根を探す (besselJはRの標準関数)
+    # エラー処理を追加
+    res <- try(uniroot(function(x) besselJ(x, nu = 0), interval = interval, tol = 1e-9), silent = TRUE)
 
-    # 排水の質量 (物質収支より)
-    mass_out_wastewater = mass_in_dirty_fiber + mass_in_washing_liquid - mass_out_washed_fiber
-
-    # 排水中の不純物濃度を計算 (ゼロ除算を防ぐ)
-    if mass_out_wastewater > 0:
-        contaminant_concentration_in_wastewater = (mass_contaminant_in_wastewater / mass_out_wastewater) * 100
-    else:
-        contaminant_concentration_in_wastewater = 0
-
-    results = {
-        "インプット (汚れた繊維)": {
-            "流量 [kg/h]": dirty_fiber_flow,
-            "不純物濃度 [%]": dirty_fiber_contaminant,
-            "不純物量 [kg/h]": mass_contaminant_in_dirty_fiber,
-            "繊維量 [kg/h]": mass_fiber_in_dirty_fiber,
-        },
-        "インプット (洗浄液)": {
-            "流量 [kg/h]": washing_liquid_flow,
-            "不純物濃度 [%]": 0,
-            "不純物量 [kg/h]": 0,
-            "水量 [kg/h]": mass_water_in_washing_liquid,
-        },
-        "アウトプット (洗浄後の繊維)": {
-            "流量 [kg/h]": mass_out_washed_fiber,
-            "不純物濃度 [%]": washed_fiber_contaminant_target,
-            "不純物量 [kg/h]": mass_contaminant_in_washed_fiber,
-            "繊維量 [kg/h]": mass_fiber_in_dirty_fiber,
-        },
-        "アウトプット (排水)": {
-            "流量 [kg/h]": mass_out_wastewater,
-            "不純物濃度 [%]": contaminant_concentration_in_wastewater,
-            "不純物量 [kg/h]": mass_contaminant_in_wastewater,
-            "水量 [kg/h]": mass_out_wastewater - mass_contaminant_in_wastewater,
-        },
-        "物質収支 (全体)": {
-            "インプット合計 [kg/h]": dirty_fiber_flow + washing_liquid_flow,
-            "アウトプット合計 [kg/h]": mass_out_washed_fiber + mass_out_wastewater,
-            "差 [kg/h]": (dirty_fiber_flow + washing_liquid_flow) - (mass_out_washed_fiber + mass_out_wastewater),
-        },
-        "物質収支 (不純物)": {
-            "インプット合計 [kg/h]": mass_contaminant_in_dirty_fiber + mass_contaminant_in_washing_liquid,
-            "アウトプット合計 [kg/h]": mass_contaminant_in_washed_fiber + mass_contaminant_in_wastewater,
-            "差 [kg/h]": (mass_contaminant_in_dirty_fiber + mass_contaminant_in_washing_liquid) - (mass_contaminant_in_washed_fiber + mass_contaminant_in_wastewater),
-        },
+    if (inherits(res, "try-error")) {
+      # 区間を広げて再試行
+       warning(paste("Root finding failed for n=", i, "in interval", paste(round(interval,2), collapse=", "), ". Trying wider interval."))
+       interval = c(lower_bound, (i + 2)*pi) # Wider interval
+       res <- try(uniroot(function(x) besselJ(x, nu = 0), interval = interval, tol = 1e-9), silent = TRUE)
+       if (inherits(res, "try-error")){
+           stop(paste("Failed to find root for n=", i))
+       } else {
+            roots[i] <- res$root
+       }
+    } else {
+      roots[i] <- res$root
     }
-    return results
+  }
+  return(roots)
+}
 
-def display_flowchart(results):
-    """物質収支の結果をフローチャート風に表示する関数"""
-    st.subheader("水洗工程フロー")
-    col1, col2, col3 = st.columns([1, 2, 1])
+# 必要な数の根を計算
+lambda_n <- find_J0_roots(n_terms)
 
-    with col1:
-        st.markdown("**インプット**")
-        st.markdown("汚れた繊維")
-        st.write(f"流量: {results['インプット (汚れた繊維)']['流量 [kg/h]']} kg/h")
-        st.write(f"不純物: {results['インプット (汚れた繊維)']['不純物量 [kg/h]']} kg/h ({results['インプット (汚れた繊維)']['不純物濃度 [%]']}%)")
-        st.markdown("⬇️")
+# --- 主要な計算 ---
+# 槽外への流出流量 (定常状態、体積一定なら流入と同じ)
+Q_out <- Q_in
 
-    with col2:
-        st.markdown("**水洗槽**")
-        st.markdown("洗浄液")
-        st.write(f"流量: {results['インプット (洗浄液)']['流量 [kg/h]']} kg/h")
-        st.markdown("⬇️")
-        st.markdown("---")
-        st.markdown("⬇️")
-        st.markdown("**アウトプット**")
-        st.markdown("洗浄後の繊維")
-        st.write(f"流量: {results['アウトプット (洗浄後の繊維)']['流量 [kg/h]']} kg/h")
-        st.write(f"不純物: {results['アウトプット (洗浄後の繊維)']['不純物量 [kg/h]']} kg/h ({results['アウトプット (洗浄後の繊維)']['不純物濃度 [%]']}%)")
-        st.markdown("⬇️")
-        st.markdown("排水")
-        st.write(f"流量: {results['アウトプット (排水)']['流量 [kg/h]']} kg/h")
-        st.write(f"不純物: {results['アウトプット (排水)']['不純物量 [kg/h]']} kg/h ({results['アウトプット (排水)']['不純物濃度 [%]']}%)")
+# 繊維の槽内滞留時間
+t_residence <- L / v_fiber
 
-    with col3:
-        st.empty() # 空の列でレイアウト調整
+# 繊維の断面積
+A_fiber <- pi * R^2
 
-def display_results_table(results):
-    """計算結果をテーブル表示する関数"""
-    st.subheader("物質収支計算結果")
-    for key, value in results.items():
-        st.subheader(key)
-        df = pd.DataFrame([value]).T.rename(columns={0: ""})
-        st.dataframe(df)
+# 繊維の体積流量
+V_dot_fiber <- A_fiber * v_fiber
 
-def main():
-    st.title("繊維水洗工程 物質収支計算")
+# 無次元時間 (フーリエ数 Fo_m)
+Fo_m <- D * t_residence / R^2
 
-    st.sidebar.header("インプット条件")
-    dirty_fiber_flow = st.sidebar.number_input("汚れた繊維 流量 [kg/h]", min_value=0.0, value=100.0)
-    dirty_fiber_contaminant = st.sidebar.number_input("汚れた繊維 不純物濃度 [%]", min_value=0.0, max_value=100.0, value=10.0)
-    washing_liquid_flow = st.sidebar.number_input("洗浄液 流量 [kg/h]", min_value=0.0, value=500.0)
-    washed_fiber_contaminant_target = st.sidebar.number_input("洗浄後の繊維 目標不純物濃度 [%]", min_value=0.0, max_value=100.0, value=1.0)
+# 級数和 F(t_residence) の計算
+# F = sum_{n=1}^N (4 / lambda_n^2) * exp(-lambda_n^2 * Fo_m)
+# Rのベクトル化機能を利用して高速に計算
+series_terms <- (4 / lambda_n^2) * exp(-lambda_n^2 * Fo_m)
+F_t_residence <- sum(series_terms)
 
-    if st.sidebar.button("計算実行"):
-        results = calculate_mass_balance(dirty_fiber_flow, dirty_fiber_contaminant, washing_liquid_flow, washed_fiber_contaminant_target)
-        display_flowchart(results)
-        display_results_table(results)
+# 繊維から除去されるDMSOの割合 (1 - F)
+# 物理的に0から1の範囲に収める
+fraction_removed <- max(0, min(1, 1 - F_t_residence))
 
-if __name__ == "__main__":
-    main()
+# 定常状態の槽内濃度 C_tank の計算
+numerator <- Q_in * C_tank_in + V_dot_fiber * C_fiber_in * fraction_removed
+denominator <- Q_out + V_dot_fiber * fraction_removed
+
+# ゼロ割防止
+if (abs(denominator) < .Machine$double.eps^0.5) { # 少し緩い条件でチェック
+  # 分子もゼロに近い場合（例：流量ゼロ、濃度差ゼロ）は入力濃度と同じなど、状況による
+  if (abs(numerator) < .Machine$double.eps^0.5) {
+    C_tank_steady_state <- C_tank_in # または C_fiber_in など、初期条件や物理的状況で判断
+    warning("Denominator and numerator are close to zero. Result might depend on initial assumptions.")
+  } else {
+    C_tank_steady_state <- Inf # 物理的に発散するケースを示唆
+    warning("Denominator close to zero, potential issue (e.g., accumulation).")
+  }
+} else {
+  C_tank_steady_state <- numerator / denominator
+}
+
+# --- 結果の表示 ---
+print(paste("繊維の槽内滞留時間 (s):", round(t_residence, 2)))
+print(paste("無次元時間 (フーリエ数 Fo_m):", round(Fo_m, 4)))
+print(paste("級数和 F(t_residence) (残存割合):", round(F_t_residence, 4)))
+print(paste("繊維から除去される濃度差の割合 (1 - F):", round(fraction_removed, 4)))
+print(paste("推定される定常状態の槽内(出口)DMSO濃度:", round(C_tank_steady_state, 6), "(入力濃度と同じ単位)"))
